@@ -1,0 +1,14 @@
+build/
+install/
+log/
+
+src/micro_ros_msgs/
+src/micro-ROS-Agent/
+
+src/balloon_detector/test/
+src/balloon_detector/resource/
+src/balloon_detector/balloon_detector/cv_detector_node.py
+src/balloon_detector/balloon_detector/detector_node.py
+
+src/px4_visual_control/resource
+src/px4_visual_control/test

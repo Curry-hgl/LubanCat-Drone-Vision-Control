@@ -15,19 +15,16 @@ def clamp(value, minimum, maximum):
 
 
 def normalize_angle(angle):
-    """将角度限制到 [-pi, pi]。"""
     return math.atan2(math.sin(angle), math.cos(angle))
 
 
 def quaternion_to_yaw(q):
-    """从 ROS 四元数中提取 yaw。"""
     siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
 
 
 def euler_to_quaternion(roll, pitch, yaw):
-    """Roll、Pitch、Yaw 转四元数。输入单位为弧度。"""
     cr = math.cos(roll * 0.5)
     sr = math.sin(roll * 0.5)
     cp = math.cos(pitch * 0.5)
@@ -36,55 +33,58 @@ def euler_to_quaternion(roll, pitch, yaw):
     sy = math.sin(yaw * 0.5)
 
     return (
-        sr * cp * cy - cr * sp * sy,  # x
-        cr * sp * cy + sr * cp * sy,  # y
-        cr * cp * sy - sr * sp * cy,  # z
-        cr * cp * cy + sr * sp * sy,  # w
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
     )
 
 
-class MAVROSVisualAttitudeControl(Node):
+class MAVROSVisualControl(Node):
 
     def __init__(self):
-        super().__init__('mavros_visual_attitude_control')
+        super().__init__('mavros_visual_control')
 
         # =========================
         # 可调参数
         # =========================
 
-        # 看到目标时的固定前倾角。
-        # 按当前约定，负值表示向前倾。
+        # 找到目标时的固定前倾角
         self.declare_parameter('forward_pitch_deg', -2.0)
 
-        # 图像水平误差 dx 转横滚角：
-        # roll_deg = roll_kp * dx
-        self.declare_parameter('roll_kp', -0.01)
-        self.declare_parameter('max_roll_deg', 5.0)
+        # dx=-1～1 转换成左右横滚角
+        self.declare_parameter('roll_gain_deg', 3.0)
+        self.declare_parameter('max_roll_deg', 3.0)
 
-        # 图像垂直误差 dy 转 thrust：
-        # thrust = neutral_thrust + thrust_kp * dy
-        self.declare_parameter('thrust_kp', 0.0005)
+        # dy=-1～1 转换成升降命令
+        self.declare_parameter('vertical_gain', 0.03)
         self.declare_parameter('neutral_thrust', 0.5)
-        self.declare_parameter('min_thrust', 0.40)
-        self.declare_parameter('max_thrust', 0.60)
+        self.declare_parameter('min_thrust', 0.47)
+        self.declare_parameter('max_thrust', 0.53)
 
-        # msg.data[3] 作为旋转误差。
-        # 单位可以是像素或其他自定义误差。
-        self.declare_parameter('yaw_rate_kp', 0.002)
-        self.declare_parameter('max_yaw_rate_deg_s', 20.0)
+        # 丢失目标后的搜索旋转速度
+        self.declare_parameter('search_yaw_rate_deg_s', 15.0)
 
-        # 目标丢失时是否继续保持当前 yaw。
-        self.declare_parameter('hold_yaw_when_lost', True)
+        # 水平和垂直误差死区
+        self.declare_parameter('horizontal_deadband', 0.05)
+        self.declare_parameter('vertical_deadband', 0.05)
+
+        # 连续多少秒没检测到才认为丢失
+        self.declare_parameter('lost_timeout', 0.3)
 
         self.forward_pitch_deg = float(
             self.get_parameter('forward_pitch_deg').value
         )
-        self.roll_kp = float(self.get_parameter('roll_kp').value)
+        self.roll_gain_deg = float(
+            self.get_parameter('roll_gain_deg').value
+        )
         self.max_roll_deg = float(
             self.get_parameter('max_roll_deg').value
         )
 
-        self.thrust_kp = float(self.get_parameter('thrust_kp').value)
+        self.vertical_gain = float(
+            self.get_parameter('vertical_gain').value
+        )
         self.neutral_thrust = float(
             self.get_parameter('neutral_thrust').value
         )
@@ -95,36 +95,44 @@ class MAVROSVisualAttitudeControl(Node):
             self.get_parameter('max_thrust').value
         )
 
-        self.yaw_rate_kp = float(
-            self.get_parameter('yaw_rate_kp').value
+        self.search_yaw_rate = math.radians(
+            float(
+                self.get_parameter(
+                    'search_yaw_rate_deg_s'
+                ).value
+            )
         )
-        self.max_yaw_rate = math.radians(
-            float(self.get_parameter('max_yaw_rate_deg_s').value)
+
+        self.horizontal_deadband = float(
+            self.get_parameter('horizontal_deadband').value
+        )
+        self.vertical_deadband = float(
+            self.get_parameter('vertical_deadband').value
+        )
+        self.lost_timeout = float(
+            self.get_parameter('lost_timeout').value
         )
 
         # =========================
-        # 控制状态
+        # 状态变量
         # =========================
 
         self.dx = 0.0
         self.dy = 0.0
-        self.rotation_error = 0.0
+        self.area = 0.0
+        self.cx = 0.0
+        self.cy = 0.0
+
         self.object_found = False
+        self.last_detection_time = None
 
         self.current_yaw = 0.0
         self.target_yaw = 0.0
         self.imu_received = False
 
-        # 20 Hz，dt = 0.05 秒。
-        self.control_period = 0.05
+        self.was_tracking = False
+        self.control_period = 0.05  # 20 Hz
 
-        # 输入格式：
-        # data[0] = dx，图像水平误差
-        # data[1] = dy，图像垂直误差
-        # data[2] = 是否发现目标，>0.5 表示发现
-        # data[3] = 旋转误差
-        # data[4] = cx
-        # data[5] = cy
         self.create_subscription(
             Float32MultiArray,
             '/camera/image_deviation',
@@ -132,7 +140,6 @@ class MAVROSVisualAttitudeControl(Node):
             10
         )
 
-        # 获取飞行器当前姿态，用于保持当前航向。
         self.create_subscription(
             Imu,
             '/mavros/imu/data',
@@ -151,89 +158,107 @@ class MAVROSVisualAttitudeControl(Node):
             self.control_loop
         )
 
-        self.get_logger().info(
-            '视觉姿态控制节点启动，等待 IMU 和视觉目标'
-        )
+        self.get_logger().info('视觉姿态控制节点启动')
 
     def imu_callback(self, msg):
         self.current_yaw = quaternion_to_yaw(msg.orientation)
 
         if not self.imu_received:
-            # 第一次收到 IMU 时，使用当前航向作为目标航向。
             self.target_yaw = self.current_yaw
             self.imu_received = True
 
-            self.get_logger().info(
-                f'已获取初始 yaw：'
-                f'{math.degrees(self.current_yaw):.1f} deg'
-            )
-
     def deviation_callback(self, msg):
-        if len(msg.data) < 3:
-            self.object_found = False
+        # 视觉消息：
+        # [dx, dy, found, area, cx, cy]
+        if len(msg.data) < 6:
             return
 
         self.dx = float(msg.data[0])
         self.dy = float(msg.data[1])
         self.object_found = msg.data[2] > 0.5
+        self.area = float(msg.data[3])
+        self.cx = float(msg.data[4])
+        self.cy = float(msg.data[5])
 
-        # 如果视觉节点提供旋转误差，放在 data[3]。
-        if len(msg.data) >= 4:
-            self.rotation_error = float(msg.data[3])
-        else:
-            self.rotation_error = 0.0
+        if self.object_found:
+            self.last_detection_time = self.get_clock().now()
+
+    def target_is_visible(self):
+        if self.object_found:
+            return True
+
+        if self.last_detection_time is None:
+            return False
+
+        elapsed = (
+            self.get_clock().now() - self.last_detection_time
+        ).nanoseconds / 1e9
+
+        return elapsed <= self.lost_timeout
 
     def control_loop(self):
         if not self.imu_received:
             return
 
-        msg = AttitudeTarget()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'base_link'
+        visible = self.target_is_visible()
 
-        # 忽略三个 body_rate，使用四元数姿态。
-        msg.type_mask = (
-            AttitudeTarget.IGNORE_ROLL_RATE
-            | AttitudeTarget.IGNORE_PITCH_RATE
-            | AttitudeTarget.IGNORE_YAW_RATE
-        )
+        if visible:
+            # 从搜索状态刚刚重新找到目标。
+            if not self.was_tracking:
+                # 停止旋转，保持找到目标瞬间的航向。
+                self.target_yaw = self.current_yaw
+                self.get_logger().info('找到目标，停止旋转')
 
-        if self.object_found:
-            # 固定小角度前倾，使飞行器向前运动。
+            # 前倾并向目标接近。
             pitch_deg = self.forward_pitch_deg
 
-            # dx 控制左右横滚。
-            roll_deg = self.roll_kp * self.dx
+            # 目标偏右 dx>0，则向右横移。
+            if abs(self.dx) > self.horizontal_deadband:
+                roll_deg = self.roll_gain_deg * self.dx
+            else:
+                roll_deg = 0.0
+
             roll_deg = clamp(
                 roll_deg,
                 -self.max_roll_deg,
                 self.max_roll_deg
             )
 
-            # dy 控制上升/下降。
-            thrust = self.neutral_thrust + self.thrust_kp * self.dy
+            # 目标在画面上方 dy>0，则上升。
+            if abs(self.dy) > self.vertical_deadband:
+                thrust = (
+                    self.neutral_thrust
+                    + self.vertical_gain * self.dy
+                )
+            else:
+                thrust = self.neutral_thrust
+
             thrust = clamp(
                 thrust,
                 self.min_thrust,
                 self.max_thrust
             )
 
-            # rotation_error 控制旋转速度，并积分成目标 yaw。
-            yaw_rate = self.yaw_rate_kp * self.rotation_error
-            yaw_rate = clamp(
-                yaw_rate,
-                -self.max_yaw_rate,
-                self.max_yaw_rate
-            )
-
-            self.target_yaw += yaw_rate * self.control_period
-            self.target_yaw = normalize_angle(self.target_yaw)
+            self.was_tracking = True
 
         else:
-            # 目标丢失：恢复水平、停止升降、保持航向。
+            if self.was_tracking:
+                # 刚刚丢失目标，从当前航向开始搜索。
+                self.target_yaw = self.current_yaw
+                self.get_logger().warn('目标丢失，开始旋转搜索')
+
+            # 丢失时保持水平和高度。
             roll_deg = 0.0
             pitch_deg = 0.0
             thrust = self.neutral_thrust
+
+            # 持续向左旋转搜索。
+            self.target_yaw += (
+                self.search_yaw_rate * self.control_period
+            )
+            self.target_yaw = normalize_angle(self.target_yaw)
+
+            self.was_tracking = False
 
         roll = math.radians(roll_deg)
         pitch = math.radians(pitch_deg)
@@ -244,6 +269,13 @@ class MAVROSVisualAttitudeControl(Node):
             self.target_yaw
         )
 
+        msg = AttitudeTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+
+        # 忽略三个角速度字段，使用四元数姿态。
+        msg.type_mask = 7
+
         msg.orientation.x = qx
         msg.orientation.y = qy
         msg.orientation.z = qz
@@ -252,6 +284,7 @@ class MAVROSVisualAttitudeControl(Node):
         msg.body_rate.x = 0.0
         msg.body_rate.y = 0.0
         msg.body_rate.z = 0.0
+
         msg.thrust = float(thrust)
 
         self.attitude_pub.publish(msg)
@@ -259,8 +292,7 @@ class MAVROSVisualAttitudeControl(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-
-    node = MAVROSVisualAttitudeControl()
+    node = MAVROSVisualControl()
 
     try:
         rclpy.spin(node)

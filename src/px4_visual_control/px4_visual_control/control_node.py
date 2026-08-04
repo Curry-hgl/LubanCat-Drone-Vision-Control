@@ -46,6 +46,7 @@ class MAVROSVisualControl(Node):
     def __init__(self):
         super().__init__('mavros_visual_control')
 
+        self.publish_count = 0
         # =========================
         # 可调参数
         # =========================
@@ -167,6 +168,9 @@ class MAVROSVisualControl(Node):
         if not self.imu_received:
             self.target_yaw = self.current_yaw
             self.imu_received = True
+            self.get_logger().info(
+            f'收到IMU，yaw={math.degrees(self.current_yaw):.2f}°'
+        )
 
     def deviation_callback(self, msg):
         # 视觉消息：
@@ -199,6 +203,9 @@ class MAVROSVisualControl(Node):
 
     def control_loop(self):
         if not self.imu_received:
+            self.get_logger().info(
+                f'未收到IMU，return'
+            )
             return
 
         visible = self.target_is_visible()
@@ -289,6 +296,14 @@ class MAVROSVisualControl(Node):
         msg.thrust = float(thrust)
 
         self.attitude_pub.publish(msg)
+
+        self.publish_count += 1
+        if self.publish_count % 20 == 0:
+            self.get_logger().info(
+                f'发布姿态：roll={roll_deg:.2f}°, '
+                f'pitch={pitch_deg:.2f}°, '
+                f'thrust={thrust:.3f}'
+            )
 
 
 def main(args=None):

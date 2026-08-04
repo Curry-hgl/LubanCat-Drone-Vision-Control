@@ -7,20 +7,22 @@
   <maintainer email="cat@todo.todo">cat</maintainer>
   <license>Apache-2.0</license>
 
+  <!-- 节点代码直接使用 -->
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mavros_msgs</depend>
 
+  <!-- 只在启动 launch 时需要 -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>balloon_detector</exec_depend>
+
+    <!-- 只在测试时需要 -->
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
-  <exec_depend>launch</exec_depend>
-  <exec_depend>launch_ros</exec_depend>
-  <exec_depend>balloon_detector</exec_depend>
-  <exec_depend>mavros_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

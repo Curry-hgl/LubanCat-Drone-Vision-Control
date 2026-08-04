@@ -4,6 +4,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 
 from std_msgs.msg import Float32MultiArray
 from sensor_msgs.msg import Imu
@@ -144,7 +145,7 @@ class MAVROSVisualControl(Node):
             Imu,
             '/mavros/imu/data',
             self.imu_callback,
-            10
+            qos_profile_sensor_data
         )
 
         self.attitude_pub = self.create_publisher(

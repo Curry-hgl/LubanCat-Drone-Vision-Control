@@ -29,5 +29,5 @@ def generate_launch_description():
                 'vertical_deadband': 0.05,
                 'lost_timeout': 0.3,
             }]
-        )
+        ),
     ])

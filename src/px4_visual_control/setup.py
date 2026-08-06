@@ -31,6 +31,7 @@ setup(
     entry_points={
         'console_scripts': [
             'control_node = px4_visual_control.control_node:main',
+            'web_monitor_node = px4_visual_control.web_monitor_node:main',
         ],
     },
 )
